@@ -8,14 +8,18 @@ import {
   FolderInput,
   Paperclip,
   Plus,
+  Sparkles,
   Trash2,
   X,
 } from 'lucide-react';
 import { formatDue, getInitials, PRIORITIES, STATUSES } from '../constants';
+import { api } from '../services/apiClient';
 import {
   DateFormatPref,
   DefaultTaskSortPref,
   ProjectRecord,
+  SmartRankItem,
+  SmartRankResponse,
   TaskFilterState,
   TaskRecord,
   TaskStatus,
@@ -75,13 +79,30 @@ export const ListView: React.FC<ListViewProps> = ({
   const [bulkBusy, setBulkBusy] = useState(false);
   const [bulkError, setBulkError] = useState('');
 
+  const [smartRankData, setSmartRankData] = useState<SmartRankResponse | null>(null);
+  const [smartRanking, setSmartRanking] = useState(false);
+  const [smartRankError, setSmartRankError] = useState('');
+
   const selectAllRef = useRef<HTMLInputElement | null>(null);
 
-  const visibleIdSet = new Set(tasks.map((t) => t.id));
+  const rankMap = new Map<number, SmartRankItem>(
+    (smartRankData?.rankedTasks || []).map((item) => [item.taskId, item])
+  );
+  const displayedTasks =
+    smartRankData && rankMap.size > 0
+      ? [...tasks].sort((a, b) => {
+          const ra = rankMap.get(a.id)?.rank ?? Number.MAX_SAFE_INTEGER;
+          const rb = rankMap.get(b.id)?.rank ?? Number.MAX_SAFE_INTEGER;
+          return ra - rb;
+        })
+      : tasks;
+
+  const visibleIdSet = new Set(displayedTasks.map((t) => t.id));
   const activeSelectedIds = selectedIds.filter((id) => visibleIdSet.has(id));
-  const allVisibleSelected = tasks.length > 0 && activeSelectedIds.length === tasks.length;
+  const allVisibleSelected =
+    displayedTasks.length > 0 && activeSelectedIds.length === displayedTasks.length;
   const someVisibleSelected =
-    activeSelectedIds.length > 0 && activeSelectedIds.length < tasks.length;
+    activeSelectedIds.length > 0 && activeSelectedIds.length < displayedTasks.length;
 
   useEffect(() => {
     if (selectAllRef.current) {
@@ -103,7 +124,7 @@ export const ListView: React.FC<ListViewProps> = ({
     if (allVisibleSelected) {
       setSelectedIds([]);
     } else {
-      setSelectedIds(tasks.map((t) => t.id));
+      setSelectedIds(displayedTasks.map((t) => t.id));
     }
   };
 
@@ -165,7 +186,21 @@ export const ListView: React.FC<ListViewProps> = ({
   };
 
   const handleExportCsv = () => {
-    downloadTasksCsv(tasks, projects, users, filters);
+    downloadTasksCsv(displayedTasks, projects, users, filters);
+  };
+
+  const handleSmartRank = async () => {
+    if (tasks.length < 2) return;
+    setSmartRanking(true);
+    setSmartRankError('');
+    try {
+      const result = await api.smartRankTasks(tasks.slice(0, 50).map((t) => t.id));
+      setSmartRankData(result);
+    } catch (err) {
+      setSmartRankError(err instanceof Error ? err.message : 'Unable to smart-rank tasks.');
+    } finally {
+      setSmartRanking(false);
+    }
   };
 
   const selectClass =
@@ -276,7 +311,10 @@ export const ListView: React.FC<ListViewProps> = ({
             <select
               aria-label="Sort tasks by"
               value={taskSort}
-              onChange={(e) => onTaskSortChange(e.target.value as DefaultTaskSortPref)}
+              onChange={(e) => {
+                setSmartRankData(null);
+                onTaskSortChange(e.target.value as DefaultTaskSortPref);
+              }}
               className="bg-transparent py-2 pr-1 text-xs font-medium text-slate-700 outline-none dark:text-slate-200"
             >
               <option value="due_date">Sort: Due date</option>
@@ -300,7 +338,7 @@ export const ListView: React.FC<ListViewProps> = ({
           </button>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           {activeSelectedIds.length === 1 && (
             <span className="text-xs font-medium text-slate-500 dark:text-slate-400">
               1 selected — select another for bulk actions
@@ -308,9 +346,23 @@ export const ListView: React.FC<ListViewProps> = ({
           )}
           <button
             type="button"
-            disabled={tasks.length === 0}
+            disabled={smartRanking || tasks.length < 2}
+            onClick={() => void handleSmartRank()}
+            title="Use Gemini to suggest task order based on deadlines, workload, and dependencies"
+            className={`inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 rounded-lg border px-3 py-2 text-xs font-semibold disabled:opacity-40 cursor-pointer ${
+              smartRankData
+                ? 'ws-accent-soft'
+                : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700'
+            }`}
+          >
+            <Sparkles className={`h-3.5 w-3.5 ws-accent-text ${smartRanking ? 'animate-pulse' : ''}`} />
+            {smartRanking ? 'Smart Ranking...' : 'Smart Rank'}
+          </button>
+          <button
+            type="button"
+            disabled={displayedTasks.length === 0}
             onClick={handleExportCsv}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-40 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700 cursor-pointer"
+            className="inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-40 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700 cursor-pointer"
           >
             <Download className="h-3.5 w-3.5" />
             Export CSV
@@ -318,13 +370,65 @@ export const ListView: React.FC<ListViewProps> = ({
           <button
             type="button"
             onClick={onCreateTask}
-            className="inline-flex items-center gap-1.5 rounded-lg px-3 py-2 text-xs font-semibold ws-accent-bg cursor-pointer"
+            className="inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 rounded-lg px-3 py-2 text-xs font-semibold ws-accent-bg cursor-pointer"
           >
             <Plus className="h-3.5 w-3.5" />
             Add Task
           </button>
         </div>
       </div>
+
+      {smartRankError && (
+        <div className="ws-card flex items-center justify-between gap-3 border-red-200 bg-red-50 px-4 py-3 text-xs font-medium text-red-700 dark:border-red-900 dark:bg-red-950/60 dark:text-red-300">
+          <span>{smartRankError}</span>
+          <button
+            type="button"
+            onClick={() => setSmartRankError('')}
+            aria-label="Dismiss Smart Rank error"
+            className="rounded p-1 hover:bg-red-100 dark:hover:bg-red-900/50 cursor-pointer"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      )}
+
+      {smartRankData && (
+        <div className="ws-card ws-card-pad flex flex-wrap items-start justify-between gap-4 border-slate-200 dark:border-slate-700">
+          <div className="min-w-0 flex-1 space-y-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="inline-flex items-center gap-1.5 font-display text-xs font-bold uppercase tracking-wider ws-accent-text">
+                <Sparkles className="h-3.5 w-3.5" />
+                Smart Rank Active
+              </span>
+              <span className="text-[11px] text-slate-400 dark:text-slate-500">·</span>
+              <span className="font-mono text-[11px] text-slate-500 dark:text-slate-400 tabular-nums">
+                {smartRankData.rankedTasks.length} tasks prioritized
+              </span>
+            </div>
+            <p className="text-xs leading-relaxed text-slate-700 dark:text-slate-300">
+              {smartRankData.strategySummary}
+            </p>
+          </div>
+          <div className="flex shrink-0 items-center gap-2">
+            <button
+              type="button"
+              disabled={smartRanking}
+              onClick={() => void handleSmartRank()}
+              className="whitespace-nowrap rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700 cursor-pointer"
+            >
+              {smartRanking ? 'Refreshing...' : 'Re-rank'}
+            </button>
+            <button
+              type="button"
+              onClick={() => setSmartRankData(null)}
+              className="inline-flex items-center gap-1 whitespace-nowrap rounded-lg border border-slate-200 px-2.5 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800 cursor-pointer"
+            >
+              <X className="h-3.5 w-3.5" />
+              Clear Rank
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Bulk Action Toolbar */}
       {activeSelectedIds.length >= 2 && (
@@ -445,7 +549,7 @@ export const ListView: React.FC<ListViewProps> = ({
 
       {/* High-Density Data Table */}
       <div className="ws-card overflow-x-auto">
-        {tasks.length === 0 ? (
+        {displayedTasks.length === 0 ? (
           <div className="py-14 text-center">
             <div className="font-display text-base font-bold text-slate-800 dark:text-slate-100">
               No matching tasks found
@@ -485,7 +589,7 @@ export const ListView: React.FC<ListViewProps> = ({
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-              {tasks.map((task) => {
+              {displayedTasks.map((task) => {
                 const proj = projectMap.get(task.projectId);
                 const prio = PRIORITIES.find((p) => p.id === task.priority);
                 const due = formatDue(task.dueDate, dateFormat);
@@ -493,6 +597,7 @@ export const ListView: React.FC<ListViewProps> = ({
                 const subDone = task.subtasks.filter((s) => s.done).length;
                 const subPct = subTotal > 0 ? Math.round((subDone / subTotal) * 100) : 0;
                 const isSelected = activeSelectedIds.includes(task.id);
+                const rankEntry = rankMap.get(task.id);
                 const assignees = (
                   task.assigneeIds.length > 0
                     ? task.assigneeIds
@@ -523,13 +628,29 @@ export const ListView: React.FC<ListViewProps> = ({
                     </td>
 
                     <td className="max-w-xs ws-cell">
-                      <button
-                        type="button"
-                        onClick={() => onOpenTask(task)}
-                        className="text-left font-semibold text-slate-900 hover:underline dark:text-slate-100 cursor-pointer"
-                      >
-                        {task.title}
-                      </button>
+                      <div className="flex items-start gap-2">
+                        {rankEntry && (
+                          <span className="mt-0.5 shrink-0 font-mono text-[11px] font-bold ws-accent-text tabular-nums">
+                            #{rankEntry.rank}
+                          </span>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => onOpenTask(task)}
+                          className="text-left font-semibold text-slate-900 hover:underline dark:text-slate-100 cursor-pointer"
+                        >
+                          {task.title}
+                        </button>
+                      </div>
+                      {rankEntry && (
+                        <div className="mt-1 text-[11px] leading-snug text-slate-500 dark:text-slate-400">
+                          <span className="font-semibold uppercase tracking-wide ws-accent-text">
+                            {rankEntry.focusFactor}
+                          </span>
+                          {' · '}
+                          {rankEntry.reason}
+                        </div>
+                      )}
                       <div className="mt-1 flex flex-wrap items-center gap-2">
                         {task.archived && (
                           <span className="rounded bg-slate-200 px-1.5 py-0.5 text-[10px] font-semibold text-slate-700 dark:bg-slate-700 dark:text-slate-200">

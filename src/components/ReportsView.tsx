@@ -1,4 +1,5 @@
-import React from 'react';
+import React, { useState } from 'react';
+import { Download } from 'lucide-react';
 import {
   Area,
   AreaChart,
@@ -10,14 +11,28 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
-import { AnalyticsSummary } from '../types';
+import { AnalyticsSummary, DateFormatPref, PerspectiveMode } from '../types';
+import { downloadAnalyticsPdf } from '../utils/pdfReport';
 
 interface ReportsViewProps {
   analytics: AnalyticsSummary | null;
   isDark: boolean;
+  dateFormat: DateFormatPref;
+  perspective: PerspectiveMode;
+  currentUserName?: string;
+  onNotifyToast?: (msg: string) => void;
 }
 
-export const ReportsView: React.FC<ReportsViewProps> = ({ analytics, isDark }) => {
+export const ReportsView: React.FC<ReportsViewProps> = ({
+  analytics,
+  isDark,
+  dateFormat,
+  perspective,
+  currentUserName,
+  onNotifyToast,
+}) => {
+  const [downloadingPdf, setDownloadingPdf] = useState(false);
+
   if (!analytics) {
     return (
       <div className="ws-card p-10 text-center text-sm text-slate-500 dark:text-slate-400">
@@ -25,6 +40,22 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ analytics, isDark }) =
       </div>
     );
   }
+
+  const handleDownloadPdf = () => {
+    setDownloadingPdf(true);
+    try {
+      const { filename } = downloadAnalyticsPdf(analytics, {
+        dateFormat,
+        perspective,
+        generatedByName: currentUserName,
+      });
+      onNotifyToast?.(`Downloaded ${filename}`);
+    } catch (err) {
+      onNotifyToast?.(err instanceof Error ? err.message : 'Unable to generate PDF report.');
+    } finally {
+      setDownloadingPdf(false);
+    }
+  };
 
   const gridStroke = isDark ? '#334155' : '#E2E8F0';
   const tickFill = isDark ? '#94A3B8' : '#475569';
@@ -47,6 +78,28 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ analytics, isDark }) =
 
   return (
     <div className="ws-stack">
+      <div className="ws-card ws-card-pad flex flex-wrap items-center justify-between gap-4">
+        <div>
+          <h2 className="font-display text-lg font-bold text-slate-900 dark:text-slate-50">
+            Analytics &amp; Progress Reports
+          </h2>
+          <p className="text-xs text-slate-500 dark:text-slate-400">
+            {perspective === 'employee'
+              ? 'Personal task delivery, throughput, and project milestones'
+              : 'Workspace-wide delivery velocity, project progress, and team workload'}
+          </p>
+        </div>
+        <button
+          type="button"
+          disabled={downloadingPdf}
+          onClick={handleDownloadPdf}
+          className="inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 rounded-xl px-4 py-2 text-xs font-semibold ws-accent-bg disabled:opacity-60 cursor-pointer"
+        >
+          <Download className="h-4 w-4" />
+          {downloadingPdf ? 'Generating PDF...' : 'Download PDF'}
+        </button>
+      </div>
+
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <div className="ws-card ws-card-pad">
           <div className="text-xs font-semibold text-slate-500 dark:text-slate-400">
@@ -54,6 +107,9 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ analytics, isDark }) =
           </div>
           <div className="mt-2 font-mono text-3xl font-bold text-emerald-600 dark:text-emerald-400 tabular-nums">
             {analytics.completionRate}%
+          </div>
+          <div className="mt-1 text-[11px] text-slate-500 dark:text-slate-400 tabular-nums">
+            {analytics.completedTasks} of {analytics.totalTasks} tasks done
           </div>
         </div>
         <div className="ws-card ws-card-pad">
@@ -63,6 +119,9 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ analytics, isDark }) =
           <div className="mt-2 font-mono text-3xl font-bold text-slate-900 dark:text-slate-50 tabular-nums">
             {analytics.avgCompletionHours}h
           </div>
+          <div className="mt-1 text-[11px] text-slate-500 dark:text-slate-400">
+            Mean task cycle duration
+          </div>
         </div>
         <div className="ws-card ws-card-pad">
           <div className="text-xs font-semibold text-slate-500 dark:text-slate-400">
@@ -71,6 +130,9 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ analytics, isDark }) =
           <div className="mt-2 font-mono text-3xl font-bold ws-accent-text tabular-nums">
             {analytics.inProgressTasks}
           </div>
+          <div className="mt-1 text-[11px] text-slate-500 dark:text-slate-400 tabular-nums">
+            {analytics.todoTasks} to do · {analytics.onHoldTasks} on hold
+          </div>
         </div>
         <div className="ws-card ws-card-pad">
           <div className="text-xs font-semibold text-slate-500 dark:text-slate-400">
@@ -78,6 +140,9 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ analytics, isDark }) =
           </div>
           <div className="mt-2 font-mono text-3xl font-bold text-red-600 dark:text-red-400 tabular-nums">
             {analytics.overdueTasks}
+          </div>
+          <div className="mt-1 text-[11px] text-slate-500 dark:text-slate-400">
+            {analytics.overdueTasks > 0 ? 'Past target due date' : 'All deadlines on track'}
           </div>
         </div>
       </div>
@@ -139,11 +204,62 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ analytics, isDark }) =
         </div>
       </div>
 
+      {/* Project Progress Summary */}
+      {analytics.projectProgress.length > 0 && (
+        <div className="ws-card ws-card-pad">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <h3 className="font-display text-base font-bold text-slate-900 dark:text-slate-50">
+                Project Progress Metrics
+              </h3>
+              <p className="text-xs text-slate-500 dark:text-slate-400">
+                Completion percentage and task throughput per initiative
+              </p>
+            </div>
+          </div>
+          <div className="mt-4 grid gap-3 sm:grid-cols-2">
+            {analytics.projectProgress.map((proj) => (
+              <div
+                key={proj.projectId}
+                className="rounded-xl border border-slate-200/80 bg-slate-50/70 p-3.5 dark:border-slate-800 dark:bg-slate-900/60"
+              >
+                <div className="flex items-center justify-between gap-3">
+                  <div className="flex min-w-0 items-center gap-2">
+                    <span
+                      className="h-2.5 w-2.5 shrink-0 rounded-full"
+                      style={{ backgroundColor: proj.color }}
+                    />
+                    <span className="truncate text-xs font-semibold text-slate-900 dark:text-slate-100">
+                      {proj.name}
+                    </span>
+                    <span className="text-[11px] capitalize text-slate-400 dark:text-slate-500">
+                      · {proj.status.replace('_', ' ')}
+                    </span>
+                  </div>
+                  <span className="shrink-0 font-mono text-xs font-bold text-slate-900 dark:text-slate-100 tabular-nums">
+                    {proj.progress}%
+                  </span>
+                </div>
+                <div className="mt-2 h-2 w-full overflow-hidden rounded-full bg-slate-200 dark:bg-slate-800">
+                  <div
+                    className="h-full rounded-full transition-all"
+                    style={{ width: `${proj.progress}%`, backgroundColor: proj.color }}
+                  />
+                </div>
+                <div className="mt-1.5 font-mono text-[10px] text-slate-500 dark:text-slate-400 tabular-nums">
+                  {proj.completed} of {proj.total} tasks completed
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Employee Performance & Workload Table */}
       <div className="ws-card overflow-x-auto">
         <div className="border-b border-slate-200 px-6 py-4 dark:border-slate-800">
           <h3 className="font-display text-base font-bold text-slate-900 dark:text-slate-50">
-            Employee Workload & Delivery Report
+            Employee Workload &amp; Delivery Report
           </h3>
         </div>
         <table className="min-w-full divide-y divide-slate-200 text-left text-xs dark:divide-slate-800">

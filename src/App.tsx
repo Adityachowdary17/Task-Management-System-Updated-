@@ -980,7 +980,14 @@ export const App: React.FC = () => {
             )}
 
             {activeModule === 'reports' && (
-              <ReportsView analytics={analytics} isDark={effectiveDark} />
+              <ReportsView
+                analytics={analytics}
+                isDark={effectiveDark}
+                dateFormat={dateFormat}
+                perspective={perspective}
+                currentUserName={currentUser.name}
+                onNotifyToast={showToast}
+              />
             )}
 
             {activeModule === 'notifications' && (

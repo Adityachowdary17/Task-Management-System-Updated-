@@ -377,4 +377,19 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(payload),
     }),
+
+  smartRankTasks: (taskIds: number[]) =>
+    apiFetch<{
+      strategySummary: string;
+      rankedTasks: Array<{
+        taskId: number;
+        rank: number;
+        reason: string;
+        focusFactor: 'deadline' | 'workload' | 'dependency' | 'priority';
+      }>;
+      generatedAt: number;
+    }>('/api/gemini/smart-rank', {
+      method: 'POST',
+      body: JSON.stringify({ taskIds }),
+    }),
 };

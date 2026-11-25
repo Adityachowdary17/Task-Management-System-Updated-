@@ -2536,6 +2536,198 @@ export function registerRoutes(app: Express, io: SocketIOServer): void {
     }
   });
 
+  app.post('/api/gemini/smart-rank', requireAuth, async (req: AuthRequest, res: Response) => {
+    try {
+      const body = req.body as { taskIds?: unknown };
+      const rawIds = Array.isArray(body.taskIds) ? body.taskIds : [];
+      const requestedIds = Array.from(
+        new Set(rawIds.map(parsePositiveInt).filter((id): id is number => id !== null))
+      ).slice(0, 50);
+
+      if (requestedIds.length < 2) {
+        res.status(400).json({ error: 'Select or filter at least 2 tasks to run Smart Rank.' });
+        return;
+      }
+
+      const targetRows = await db.select().from(tasks).where(inArray(tasks.id, requestedIds));
+      const rowMap = new Map(targetRows.map((t) => [t.id, t]));
+      const orderedTargetTasks = requestedIds
+        .map((id) => rowMap.get(id))
+        .filter((t): t is NonNullable<typeof t> => Boolean(t));
+
+      if (orderedTargetTasks.length < 2) {
+        res.status(404).json({ error: 'At least 2 matching tasks are required for Smart Rank.' });
+        return;
+      }
+
+      const [allProjects, allUsers, allActiveTasks] = await Promise.all([
+        db.select().from(projects),
+        db.select().from(users),
+        db.select().from(tasks).where(eq(tasks.archived, false)),
+      ]);
+
+      const todayIso = new Date().toISOString().slice(0, 10);
+      const projectMap = new Map(allProjects.map((p) => [p.id, p]));
+      const userMap = new Map(allUsers.map((u) => [u.id, sanitizeUser(u)]));
+
+      const workloadMap = new Map<number, { open: number; overdue: number; high: number }>();
+      for (const t of allActiveTasks) {
+        if (t.status === 'completed') continue;
+        const assignees = Array.from(
+          new Set([...t.assigneeIds, ...(t.assigneeId ? [t.assigneeId] : [])])
+        );
+        const isOverdue = Boolean(t.dueDate && t.dueDate < todayIso);
+        for (const uid of assignees) {
+          const cur = workloadMap.get(uid) || { open: 0, overdue: 0, high: 0 };
+          cur.open += 1;
+          if (isOverdue) cur.overdue += 1;
+          if (t.priority === 'high') cur.high += 1;
+          workloadMap.set(uid, cur);
+        }
+      }
+
+      const projectContextLines = allProjects
+        .map((p) => {
+          const openInProj = allActiveTasks.filter(
+            (t) => t.projectId === p.id && t.status !== 'completed'
+          ).length;
+          return `- Project #${p.id} "${p.name}" | status=${p.status} | deadline=${p.deadline || 'none'} | openTasks=${openInProj}`;
+        })
+        .join('\n');
+
+      const taskContextLines = orderedTargetTasks
+        .map((t) => {
+          const proj = projectMap.get(t.projectId);
+          const assigneeIds = Array.from(
+            new Set([...t.assigneeIds, ...(t.assigneeId ? [t.assigneeId] : [])])
+          );
+          const assigneeSummary =
+            assigneeIds.length > 0
+              ? assigneeIds
+                  .map((uid) => {
+                    const u = userMap.get(uid);
+                    const load = workloadMap.get(uid) || { open: 0, overdue: 0, high: 0 };
+                    return `${u?.name || `User ${uid}`} (open=${load.open}, overdue=${load.overdue}, high=${load.high})`;
+                  })
+                  .join('; ')
+              : 'Unassigned';
+          const subDone = t.subtasks.filter((s) => s.done).length;
+          const descSnippet = t.description.replace(/\s+/g, ' ').trim().slice(0, 140);
+          return `- [taskId=${t.id}] "${t.title}" | status=${t.status} | priority=${t.priority} | category=${t.category} | due=${t.dueDate || 'none'} | project="${proj?.name || 'Workspace'}" (status=${proj?.status || 'active'}, deadline=${proj?.deadline || 'none'}) | assignees=[${assigneeSummary}] | tags=[${t.tags.join(',')}] | subtasks=${subDone}/${t.subtasks.length}${descSnippet ? ` | notes="${descSnippet}"` : ''}`;
+        })
+        .join('\n');
+
+      const ai = getGeminiClient();
+      const response = await ai.models.generateContent({
+        model: 'gemini-4-hydrogen',
+        contents: [
+          `Today's date: ${todayIso}`,
+          `Workspace Projects:\n${projectContextLines}`,
+          `Tasks to Rank (${orderedTargetTasks.length}):\n${taskContextLines}`,
+          'Rank ALL listed taskId values from highest execution urgency (index 0) to lowest (last), considering: (1) overdue and upcoming task deadlines relative to today, (2) assignee workload and avoiding bottlenecks on overloaded members while prioritizing unblocking critical work, and (3) project interdependencies, shared tags/milestones, at-risk projects, and tasks already in progress vs completed.',
+        ].join('\n\n'),
+        config: {
+          systemInstruction:
+            'You are the Cadence Sprint Scheduling & Dependency Strategist. Return grounded JSON matching the schema. Include every provided taskId exactly once in rankedTasks, with a concise 1-sentence reason (<= 110 chars) and the primary focusFactor.',
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              strategySummary: { type: Type.STRING },
+              rankedTasks: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    taskId: { type: Type.INTEGER },
+                    reason: { type: Type.STRING },
+                    focusFactor: {
+                      type: Type.STRING,
+                      enum: ['deadline', 'workload', 'dependency', 'priority'],
+                    },
+                  },
+                  required: ['taskId', 'reason', 'focusFactor'],
+                },
+              },
+            },
+            required: ['strategySummary', 'rankedTasks'],
+          },
+        },
+      });
+
+      const parsed = JSON.parse((response.text ?? '{}').trim()) as {
+        strategySummary?: string;
+        rankedTasks?: Array<{
+          taskId?: unknown;
+          reason?: unknown;
+          focusFactor?: unknown;
+        }>;
+      };
+
+      const validIdSet = new Set(orderedTargetTasks.map((t) => t.id));
+      const seenIds = new Set<number>();
+      const validFactors = new Set(['deadline', 'workload', 'dependency', 'priority']);
+      const finalRanked: Array<{
+        taskId: number;
+        rank: number;
+        reason: string;
+        focusFactor: 'deadline' | 'workload' | 'dependency' | 'priority';
+      }> = [];
+
+      if (Array.isArray(parsed.rankedTasks)) {
+        for (const item of parsed.rankedTasks) {
+          const tid = parsePositiveInt(item?.taskId);
+          if (!tid || !validIdSet.has(tid) || seenIds.has(tid)) continue;
+          seenIds.add(tid);
+          const rawFactor = typeof item.focusFactor === 'string' ? item.focusFactor : '';
+          const focusFactor = validFactors.has(rawFactor)
+            ? (rawFactor as 'deadline' | 'workload' | 'dependency' | 'priority')
+            : 'priority';
+          const reason =
+            typeof item.reason === 'string' && item.reason.trim()
+              ? item.reason.trim().slice(0, 140)
+              : 'Ordered by urgency and workspace capacity.';
+          finalRanked.push({
+            taskId: tid,
+            rank: finalRanked.length + 1,
+            reason,
+            focusFactor,
+          });
+        }
+      }
+
+      for (const t of orderedTargetTasks) {
+        if (!seenIds.has(t.id)) {
+          seenIds.add(t.id);
+          finalRanked.push({
+            taskId: t.id,
+            rank: finalRanked.length + 1,
+            reason:
+              t.status === 'completed'
+                ? 'Already completed; lower execution priority.'
+                : 'Queued after higher-urgency deadline and dependency items.',
+            focusFactor: 'priority',
+          });
+        }
+      }
+
+      res.json({
+        strategySummary: (
+          parsed.strategySummary ||
+          'Tasks ordered by deadline urgency, assignee workload balance, and project dependencies.'
+        )
+          .trim()
+          .slice(0, 500),
+        rankedTasks: finalRanked,
+        generatedAt: Date.now(),
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Failed to smart-rank tasks.';
+      console.error('Gemini smart-rank error:', msg);
+      res.status(msg.includes('GEMINI_API_KEY') ? 503 : 500).json({ error: msg });
+    }
+  });
+
   app.post('/api/gemini/chat', requireAuth, async (req: AuthRequest, res: Response) => {
     try {
       const body = req.body as {

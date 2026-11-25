@@ -226,3 +226,16 @@ export interface ChatMessage {
   text: string;
   sources: GroundingSource[];
 }
+
+export interface SmartRankItem {
+  taskId: number;
+  rank: number;
+  reason: string;
+  focusFactor: 'deadline' | 'workload' | 'dependency' | 'priority';
+}
+
+export interface SmartRankResponse {
+  strategySummary: string;
+  rankedTasks: SmartRankItem[];
+  generatedAt: number;
+}

@@ -1,0 +1,6 @@
+{
+  "name": "Cadence — task workspace",
+  "description": "Task workspace with dashboard, task list, drag-and-drop board, Firestore persistence, and Gemini assistant.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
